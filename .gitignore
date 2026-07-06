@@ -31,3 +31,8 @@ Thumbs.db
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Notebooks
+notebooks/outputs/data/embeddings.npy
+notebooks/outputs/faiss_index/papers.index
+notebooks/outputs/data/papers_df.pkl
