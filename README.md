@@ -5,6 +5,7 @@
 [![Streamlit](https://img.shields.io/badge/Streamlit-Live%20App-ff4b4b?logo=streamlit)](https://YOUR-APP-URL.streamlit.app)
 [![HuggingFace](https://img.shields.io/badge/HuggingFace-Transformers-yellow?logo=huggingface)](https://huggingface.co)
 [![FAISS](https://img.shields.io/badge/FAISS-Vector%20Search-blue)](https://github.com/facebookresearch/faiss)
+[![Groq](https://img.shields.io/badge/Groq-LLaMA3-orange)](https://console.groq.com)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 > **Live Demo →** [YOUR-APP-URL.streamlit.app](https://YOUR-APP-URL.streamlit.app)
@@ -23,13 +24,34 @@ Research paper discovery is a challenge — with millions of papers published ev
 This project builds a complete **AI-powered Research Paper Intelligence System** that:
 
 1. **Searches** 50,000 ArXiv ML papers semantically (meaning-based, not keyword-based)
-2. **Summarizes** papers automatically using BART
-3. **Extracts keywords** using KeyBERT with MMR diversity
-4. **Visualizes** paper similarity as an interactive graph
-5. **Maps** topic clusters via Citation Network
-6. **Compares** two papers side-by-side
-7. **Exports** results as a formatted PDF report
-8. **Saves** papers to Bookmarks and tracks Search History
+2. **Compares** Semantic Search vs TF-IDF Search side-by-side
+3. **Summarizes** papers using BART (local) or Groq LLaMA3 (AI-powered)
+4. **Extracts keywords** using KeyBERT vs TF-IDF comparison
+5. **Visualizes** paper similarity as an interactive NetworkX graph
+6. **Maps** topic clusters via Citation Network
+7. **Compares** two papers side-by-side with Groq AI analysis
+8. **Exports** results as a formatted PDF report
+9. **Saves** papers to Bookmarks and tracks Search History
+
+---
+
+## 🤖 Groq API Key Setup
+
+This project uses **Groq LLaMA3-8b** for AI-powered summarization, search insights, and paper comparison analysis.
+
+**Get free API key (takes 2 min):**
+1. Go to 👉 [console.groq.com](https://console.groq.com)
+2. Sign up (free) → API Keys → Create Key
+3. Copy the key (starts with `gsk_...`)
+
+**Where to add:**
+
+| Where | How |
+|---|---|
+| **Streamlit App** | Sidebar → "🤖 Groq API Key" field → paste key |
+| **Notebook 2** | Cell 9 → `GROQ_API_KEY = "your_groq_api_key_here"` → replace |
+
+> Core features (search, BART summary, graphs, PDF) work without Groq. Groq powers the 🤖 AI analysis buttons only.
 
 ---
 
@@ -43,7 +65,7 @@ AI-Research-Paper-Intelligence-System/
 │   └── 02_App_and_Features.ipynb      # All features tested end-to-end
 │
 ├── 🌐 app/
-│   └── app.py                         # Streamlit dashboard (6 pages)
+│   └── app.py                         # Streamlit dashboard (7 pages)
 │
 ├── 📊 outputs/
 │   ├── faiss_index/papers.index       # FAISS index (auto-generated)
@@ -53,7 +75,9 @@ AI-Research-Paper-Intelligence-System/
 │   ├── 02_top_keywords.png
 │   ├── 03_similarity_graph.png
 │   ├── 04_citation_network.png
-│   └── 05_paper_comparison.png
+│   ├── 05_paper_comparison.png
+│   ├── 06_semantic_vs_tfidf.png
+│   └── 07_keybert_vs_tfidf.png
 │
 ├── requirements.txt
 ├── .gitignore
@@ -70,7 +94,7 @@ AI-Research-Paper-Intelligence-System/
 | **Total Papers** | 50,000 ArXiv ML papers |
 | **Fields** | `title`, `abstract` |
 | **Domain** | Machine Learning, AI, Deep Learning |
-| **API Key Required** | ❌ None — fully public |
+| **API Key Required** | ❌ None — fully public dataset |
 
 ---
 
@@ -79,7 +103,7 @@ AI-Research-Paper-Intelligence-System/
 ### Step 1 — Data Loading & EDA
 - Load `CShorten/ML-ArXiv-Papers` from HuggingFace datasets
 - Sample 50,000 papers, clean and combine title + abstract
-- EDA: Abstract/title length distributions, top keyword frequency analysis
+- EDA: Abstract/title length distributions, top keyword frequency
 
 ### Step 2 — Semantic Embeddings
 - Model: `sentence-transformers/all-MiniLM-L6-v2`
@@ -88,66 +112,66 @@ AI-Research-Paper-Intelligence-System/
 
 ### Step 3 — FAISS Index
 - `faiss.IndexFlatIP` (Inner Product = cosine after normalization)
-- All 50,000 vectors indexed for millisecond search
+- All 50,000 vectors indexed for millisecond retrieval
 
-### Step 4 — MMR Search
+### Step 4 — TF-IDF Index
+- `sklearn.TfidfVectorizer` with `max_features=10000`, `ngram_range=(1,2)`
+- Sparse keyword-based search for comparison with semantic search
+
+### Step 5 — MMR Search
 - Query → embedding → FAISS top-K candidates
 - **MMR (Maximal Marginal Relevance)** re-ranking for diverse results
-- Balances relevance vs redundancy via `diversity` parameter
 
-### Step 5 — Summarization
-- Model: `sshleifer/distilbart-cnn-12-6`
-- Summarizes abstracts to 40–120 word summaries
+### Step 6 — Summarization (2 options)
+- **BART:** `sshleifer/distilbart-cnn-12-6` — local, no API key
+- **Groq LLaMA3:** `llama3-8b-8192` — faster, AI-powered, needs free key
 
-### Step 6 — Keyword Extraction
-- KeyBERT with MMR diversity (`keyphrase_ngram_range=(1,2)`)
-- Returns top-8 diverse keyphrases per paper
+### Step 7 — Keyword Extraction (2 methods compared)
+- **KeyBERT** with MMR diversity (`keyphrase_ngram_range=(1,2)`)
+- **TF-IDF** from the same vectorizer — direct comparison
 
 ---
 
 ## 🌟 Unique Features
 
+### 📊 Semantic vs TF-IDF Search Comparison
+Compare dense semantic search vs sparse keyword search side-by-side. See which papers each method finds and how many overlap.
+
+![Semantic vs TF-IDF](outputs/06_semantic_vs_tfidf.png)
+
+### 🏷️ KeyBERT vs TF-IDF Keyword Comparison
+Extract keywords using both methods and compare — semantic understanding (KeyBERT) vs term frequency (TF-IDF).
+
+![KeyBERT vs TF-IDF](outputs/07_keybert_vs_tfidf.png)
+
 ### 🌐 Paper Similarity Graph
 Visualize semantic similarity between retrieved papers as a **NetworkX graph**.
 - Nodes = papers (colored by relevance score)
-- Edges = cosine similarity > threshold
-- Edge labels show exact similarity scores
+- Edges = cosine similarity > threshold with exact scores
 
 ![Similarity Graph](outputs/03_similarity_graph.png)
 
 ### 🕸️ Citation Network
-Enter **2–4 different topics** to see how papers across topics interconnect.
+Enter 2–4 different topics to see how papers across topics interconnect.
 - Each topic = a colored cluster
-- Solid edges = intra-topic similarity
 - Dashed edges = cross-topic semantic overlap
 
 ![Citation Network](outputs/04_citation_network.png)
 
-### ⚖️ Compare Two Papers Side-by-Side
-Find the best paper for two different queries and compare:
-- Summaries side-by-side
-- Keyword comparison chart
-- Cross-paper similarity score
-- Common keywords highlighted
+### ⚖️ Compare Two Papers (Semantic + TF-IDF + Groq)
+Find best paper for two queries and compare:
+- BART summaries side-by-side
+- Semantic similarity score
+- TF-IDF similarity score
+- Groq LLaMA AI analysis of key differences
 
 ![Paper Comparison](outputs/05_paper_comparison.png)
 
 ### 📄 PDF Export
-Export any search results as a **formatted PDF report** (ReportLab):
-- Query, timestamp, paper count
-- Per-paper: title, relevance score, summary, keywords, abstract
+Export search results as formatted PDF (ReportLab) — query, scores, summaries, keywords, abstracts.
 
-### 🔖 Bookmarks
-Save interesting papers during search sessions:
-- Persistent via JSON file
-- Remove individual bookmarks
-- Export all bookmarks as PDF
-
-### 🕐 Search History
-Track all queries automatically:
-- Last 30 searches stored
-- One-click re-search from history
-- Timestamp per query
+### 🔖 Bookmarks + 🕐 Search History
+Save interesting papers and track all past queries with one-click re-search.
 
 ---
 
@@ -157,12 +181,13 @@ Track all queries automatically:
 |---|---|---|
 | Python | 3.10 | Core language |
 | `sentence-transformers` | ≥2.7.0 | `all-MiniLM-L6-v2` embeddings |
-| FAISS | ≥1.8.0 | Vector similarity search |
+| FAISS | ≥1.8.0 | Dense vector similarity search |
 | HuggingFace Transformers | ≥4.40.0 | DistilBART summarization |
 | KeyBERT | ≥0.8.0 | Keyword extraction with MMR |
+| Scikit-Learn TF-IDF | ≥1.5.0 | Sparse keyword search + comparison |
+| Groq | latest | LLaMA3-8b AI analysis |
 | NetworkX | ≥3.3 | Similarity & citation graphs |
 | ReportLab | ≥4.1.0 | PDF export |
-| Scikit-Learn | ≥1.5.0 | Cosine similarity |
 | Streamlit | ≥1.35.0 | Interactive dashboard |
 | Pandas / NumPy | latest | Data processing |
 
@@ -171,7 +196,7 @@ Track all queries automatically:
 ## 🚀 How to Run
 
 ### Option 1: Google Colab (Recommended)
-Click the Colab badges above — no setup needed!
+Click the Colab badges above — no local setup needed!
 
 ### Option 2: Local
 ```bash
@@ -179,32 +204,33 @@ git clone https://github.com/arch-ship/AI-Research-Paper-Intelligence-System.git
 cd AI-Research-Paper-Intelligence-System
 pip install -r requirements.txt
 
-# Step 1: Run Notebook 1 to build FAISS index
+# Step 1: Build FAISS index
 jupyter notebook notebook/01_Data_and_Index.ipynb
 
-# Step 2: Run Notebook 2 to test all features
+# Step 2: Test all features
 jupyter notebook notebook/02_App_and_Features.ipynb
 
-# Step 3: Launch Streamlit app
+# Step 3: Launch app
 streamlit run app/app.py
 ```
 
 ### Option 3: Live Demo
 👉 [YOUR-APP-URL.streamlit.app](https://YOUR-APP-URL.streamlit.app)
 
-> **Note:** No API keys required. All models download automatically from HuggingFace on first run.
+> No API keys required for core features. Groq key optional for AI analysis.
 
 ---
 
-## 📱 Streamlit App — 6 Pages
+## 📱 Streamlit App — 7 Pages
 
 | Page | Feature |
 |---|---|
-| 🔍 Search Papers | Semantic search with MMR toggle, auto-summarize, PDF export |
+| 🔍 Search Papers | Semantic search, BART + Groq summaries, KeyBERT + TF-IDF keywords, PDF export |
+| 📊 Semantic vs TF-IDF | Side-by-side search method comparison with bar charts |
 | 🌐 Similarity Graph | NetworkX graph of paper similarities |
 | 🕸️ Citation Network | Multi-topic cluster visualization |
-| ⚖️ Compare Papers | Side-by-side paper comparison |
-| 🔖 Bookmarks | Save and export papers |
+| ⚖️ Compare Papers | Side-by-side comparison + Semantic sim + TF-IDF sim + Groq analysis |
+| 🔖 Bookmarks | Save and export papers as PDF |
 | 🕐 Search History | Track all past queries |
 
 Dark/Light theme toggle available in sidebar.
@@ -220,6 +246,8 @@ Dark/Light theme toggle available in sidebar.
 | `outputs/03_similarity_graph.png` | Paper similarity network |
 | `outputs/04_citation_network.png` | Multi-topic citation network |
 | `outputs/05_paper_comparison.png` | Side-by-side keyword comparison |
+| `outputs/06_semantic_vs_tfidf.png` | Semantic vs TF-IDF search results |
+| `outputs/07_keybert_vs_tfidf.png` | KeyBERT vs TF-IDF keywords |
 | `outputs/search_results.pdf` | Exported search results |
 | `outputs/bookmarks.json` | Saved bookmarks |
 | `outputs/search_history.json` | Search history |
@@ -240,7 +268,7 @@ Dark/Light theme toggle available in sidebar.
 - [ ] LangChain RetrievalQA for conversational paper Q&A
 - [ ] GLiNER zero-shot NER for tech entity extraction
 - [ ] Paper recommendation based on reading history
-- [ ] Multi-language support
+- [ ] Multi-language abstract support
 
 ---
 
