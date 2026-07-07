@@ -1,548 +1,604 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+import faiss
+import os
+import json
 import warnings
+import networkx as nx
+import matplotlib.pyplot as plt
+import torch
+from datetime import datetime
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import cosine_similarity as cos_sim
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from keybert import KeyBERT
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from groq import Groq
+import io
+
 warnings.filterwarnings('ignore')
 
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    roc_auc_score, roc_curve, confusion_matrix, silhouette_score
-)
-from xgboost import XGBClassifier
-import shap
-
-# ─── Page Config ───────────────────────────────────────────────
+# ── Page Config ────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Telco Churn Predictor | CBSOT 2026",
-    page_icon="📡",
+    page_title="AI Research Paper Intelligence System",
+    page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ─── Theme Toggle ──────────────────────────────────────────────
-if 'dark_mode' not in st.session_state:
-    st.session_state.dark_mode = False
+# ── Session State ──────────────────────────────────────────────
+if 'dark_mode'  not in st.session_state: st.session_state.dark_mode  = False
+if 'bookmarks'  not in st.session_state: st.session_state.bookmarks  = []
+if 'history'    not in st.session_state: st.session_state.history    = []
+if 'groq_key'   not in st.session_state: st.session_state.groq_key   = ""
 
-# ─── Custom CSS (theme-aware) ───────────────────────────────────
+# ── CSS ────────────────────────────────────────────────────────
 def get_css(dark):
-    bg       = "#0e1117" if dark else "#ffffff"
-    card_bg  = "#1e2130" if dark else "#f8f9fa"
-    text     = "#fafafa" if dark else "#111111"
-    border   = "#444" if dark else "#dee2e6"
-    hr_bg    = "#ffe0e0" if not dark else "#3d1a1a"
-    bud_bg   = "#e0ffe0" if not dark else "#1a3d1a"
-    pre_bg   = "#e0eaff" if not dark else "#1a2a3d"
+    bg, card = ("#0e1117","#1e2130") if dark else ("#f8f9fa","#ffffff")
+    text, border = ("#fafafa","#444") if dark else ("#111","#dee2e6")
     return f"""
 <style>
-    .stApp {{ background-color: {bg}; color: {text}; }}
-    .main-header {{
-        font-size: 2.2rem; font-weight: 800;
-        background: linear-gradient(90deg, #667eea, #764ba2);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    }}
-    .metric-card {{
-        background: {card_bg};
-        border: 1px solid {border}; border-radius: 12px;
-        padding: 1rem; text-align: center;
-    }}
-    .segment-card {{ border-radius: 10px; padding: 1rem; margin: 0.5rem 0; color: #111; }}
-    .high-risk   {{ background: {hr_bg};  border-left: 4px solid #e74c3c; }}
-    .budget      {{ background: {bud_bg}; border-left: 4px solid #2ecc71; }}
-    .premium     {{ background: {pre_bg}; border-left: 4px solid #3498db; }}
-    .stTabs [data-baseweb="tab"] {{ font-size: 1rem; font-weight: 600; }}
-</style>
-"""
+.stApp {{ background-color:{bg}; color:{text}; }}
+.main-title {{
+    font-size:2rem; font-weight:800;
+    background:linear-gradient(90deg,#667eea,#764ba2);
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+}}
+.paper-card {{
+    background:{card}; border:1px solid {border};
+    border-radius:12px; padding:1.2rem; margin-bottom:1rem;
+    border-left:4px solid #667eea;
+}}
+.keyword-chip {{
+    background:#2ecc7122; border:1px solid #2ecc71;
+    border-radius:12px; padding:2px 8px;
+    font-size:0.75rem; color:#2ecc71; margin-right:4px;
+}}
+.stTabs [data-baseweb="tab"] {{ font-weight:600; }}
+</style>"""
 
 st.markdown(get_css(st.session_state.dark_mode), unsafe_allow_html=True)
 
-# ─── Load & Preprocess Data ────────────────────────────────────
-@st.cache_data
-def load_and_preprocess():
-    try:
-        df = pd.read_excel('data/Telco_customer_churn.xlsx')
-    except:
-        df = pd.read_excel('../data/Telco_customer_churn.xlsx')
-
-    df['Total Charges'] = pd.to_numeric(df['Total Charges'], errors='coerce').fillna(0)
-    df_orig = df.copy()
-
-    drop_cols = ['CustomerID','Count','Country','State','City','Zip Code',
-                 'Lat Long','Latitude','Longitude','Churn Label',
-                 'Churn Score','CLTV','Churn Reason']
-    df_ml = df.drop(columns=drop_cols)
-    df_encoded = pd.get_dummies(df_ml, drop_first=True)
-    X = df_encoded.drop('Churn Value', axis=1)
-    y = df_encoded['Churn Value']
-    return df_orig, X, y
+# ── Load Models ────────────────────────────────────────────────
+@st.cache_resource
+def load_models():
+    embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+    tokenizer   = AutoTokenizer.from_pretrained('sshleifer/distilbart-cnn-12-6')
+    bart        = AutoModelForSeq2SeqLM.from_pretrained('sshleifer/distilbart-cnn-12-6')
+    kw_model    = KeyBERT()
+    return embed_model, tokenizer, bart, kw_model
 
 @st.cache_resource
-def train_models(X, y):
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.20, random_state=42, stratify=y
-    )
+def load_data():
+    idx  = faiss.read_index('outputs/faiss_index/papers.index')
+    df   = pd.read_pickle('outputs/data/papers_df.pkl')
+    embs = np.load('outputs/data/embeddings.npy')
+    return idx, df, embs
 
-    # RF Baseline
-    rf_base = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
-    rf_base.fit(X_train, y_train)
+@st.cache_resource
+def build_tfidf(_df):
+    vec = TfidfVectorizer(max_features=10000, stop_words='english', ngram_range=(1,2))
+    mat = vec.fit_transform(_df['text'].tolist())
+    return vec, mat
 
-    # RF Balanced
-    rf_bal = RandomForestClassifier(n_estimators=100, class_weight='balanced',
-                                     random_state=42, n_jobs=-1)
-    rf_bal.fit(X_train, y_train)
+# ── Core Functions ─────────────────────────────────────────────
+def semantic_search(query, top_k=10, mmr=True, diversity=0.3):
+    q_emb = embed_model.encode([query], convert_to_numpy=True)
+    faiss.normalize_L2(q_emb)
+    fetch_k = top_k*3 if mmr else top_k
+    scores, indices = index.search(q_emb, fetch_k)
+    results = [{'idx':int(idx),'title':df['title'].iloc[idx],
+                'abstract':df['abstract'].iloc[idx],'score':float(score)}
+               for idx,score in zip(indices[0],scores[0])]
+    if not mmr: return results[:top_k]
+    cands = np.array([embeddings[r['idx']] for r in results])
+    sel   = [0]
+    while len(sel) < top_k:
+        rem = [i for i in range(len(results)) if i not in sel]
+        if not rem: break
+        mmr_s = [(1-diversity)*results[i]['score'] -
+                 diversity*max(cosine_similarity(cands[i].reshape(1,-1),
+                               cands[j].reshape(1,-1))[0][0] for j in sel)
+                 for i in rem]
+        sel.append(rem[np.argmax(mmr_s)])
+    return [results[i] for i in sel]
 
-    # RF GridSearchCV tuned
-    param_grid = {'n_estimators': [100, 300, 500], 'max_depth': [5, 10, 15]}
-    gs = GridSearchCV(
-        RandomForestClassifier(class_weight='balanced', random_state=42, n_jobs=-1),
-        param_grid, cv=3, scoring='recall', n_jobs=-1
-    )
-    gs.fit(X_train, y_train)
-    rf_tuned = gs.best_estimator_
+def tfidf_search(query, top_k=10):
+    q_vec  = tfidf_vec.transform([query])
+    scores = cos_sim(q_vec, tfidf_mat).flatten()
+    top    = scores.argsort()[::-1][:top_k]
+    return [{'idx':int(i),'title':df['title'].iloc[i],
+             'abstract':df['abstract'].iloc[i],'score':float(scores[i])} for i in top]
 
-    # XGBoost
-    spw = (y_train == 0).sum() / (y_train == 1).sum()
-    xgb = XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.05,
-                         scale_pos_weight=spw, random_state=42,
-                         eval_metric='logloss', verbosity=0)
-    xgb.fit(X_train, y_train)
+def summarize_bart(text):
+    try:
+        inp = tokenizer(text[:1024], return_tensors='pt', truncation=True, max_length=1024)
+        with torch.no_grad():
+            ids = bart_model.generate(inp['input_ids'], max_length=120,
+                                      min_length=40, num_beams=4, early_stopping=True)
+        return tokenizer.decode(ids[0], skip_special_tokens=True)
+    except:
+        return text[:300]+'...'
 
-    return rf_base, rf_bal, rf_tuned, xgb, X_train, X_test, y_train, y_test, gs.best_params_
+def get_keywords(text, top_n=8):
+    kws = kw_model.extract_keywords(text, keyphrase_ngram_range=(1,2),
+                                     stop_words='english', use_mmr=True,
+                                     diversity=0.5, top_n=top_n)
+    return [k[0] for k in kws]
 
-@st.cache_data
-def get_segmentation(_rf_tuned, _X, df_orig):
-    churn_prob = _rf_tuned.predict_proba(_X)[:, 1]
-    seg = pd.DataFrame({
-        'Tenure Months'    : df_orig['Tenure Months'].values,
-        'Monthly Charges'  : df_orig['Monthly Charges'].values,
-        'Total Charges'    : df_orig['Total Charges'].values,
-        'Churn Probability': churn_prob
-    })
-    scaler = StandardScaler()
-    scaled = scaler.fit_transform(seg)
-    km = KMeans(n_clusters=3, random_state=42, n_init=10)
-    seg['Cluster'] = km.fit_predict(scaled)
+def get_tfidf_keywords(text, top_n=8):
+    doc_vec   = tfidf_vec.transform([text])
+    feat      = tfidf_vec.get_feature_names_out()
+    sc        = doc_vec.toarray().flatten()
+    top       = sc.argsort()[::-1][:top_n]
+    return [feat[i] for i in top if sc[i] > 0]
 
-    # Name clusters by churn probability rank
-    churn_by_cluster = seg.groupby('Cluster')['Churn Probability'].mean().rank()
-    seg_map = {}
-    for c, r in churn_by_cluster.items():
-        if r == 1: seg_map[c] = 'Budget Loyal Customers'
-        elif r == 2: seg_map[c] = 'High Risk Customers'
-        else: seg_map[c] = 'Loyal Premium Customers'
-    seg['Segment'] = seg['Cluster'].map(seg_map)
+def groq_call(prompt, max_tokens=250):
+    if not st.session_state.groq_key:
+        return "⚠️ Add your Groq API key in the sidebar."
+    try:
+        client = Groq(api_key=st.session_state.groq_key)
+        resp   = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role":"user","content":prompt}],
+            max_tokens=max_tokens, temperature=0.4
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Groq error: {e}"
 
-    def risk_cat(p):
-        if p < 0.30: return 'Low Risk'
-        elif p < 0.60: return 'Medium Risk'
-        return 'High Risk'
-    seg['Churn Risk'] = seg['Churn Probability'].apply(risk_cat)
+def groq_summarize(text):
+    return groq_call(f"Summarize this ML research paper abstract in 80 words or less. "
+                     f"Highlight the key contribution.\n\nAbstract: {text[:2000]}\n\nSummary:")
 
-    sil = silhouette_score(scaled, seg['Cluster'])
-    return seg, sil
+def groq_insights(query, results):
+    titles = '\n'.join([f'{i+1}. {r["title"]}' for i,r in enumerate(results)])
+    return groq_call(f'Top papers for "{query}":\n{titles}\n\n'
+                     f'In 3-4 sentences, what is the current research trend in this area?')
 
-def get_metrics(model, X_test, y_test):
-    y_pred = model.predict(X_test)
-    y_prob = model.predict_proba(X_test)[:, 1]
-    return {
-        'Accuracy' : round(accuracy_score(y_test, y_pred), 4),
-        'Precision': round(precision_score(y_test, y_pred), 4),
-        'Recall'   : round(recall_score(y_test, y_pred), 4),
-        'F1'       : round(f1_score(y_test, y_pred), 4),
-        'ROC-AUC'  : round(roc_auc_score(y_test, y_prob), 4),
-    }, y_pred, y_prob
+def groq_compare(r1, r2, cross_sim):
+    return groq_call(
+        f"Compare these 2 ML papers briefly.\n\n"
+        f"Paper A: {r1['title']}\nAbstract A: {r1['abstract'][:500]}\n\n"
+        f"Paper B: {r2['title']}\nAbstract B: {r2['abstract'][:500]}\n\n"
+        f"Semantic similarity: {cross_sim:.4f}\n\n"
+        f"1. Key difference in approach\n2. Problem each solves\n3. Which is more novel\n"
+        f"Keep under 150 words.", max_tokens=300)
 
-# ─── MAIN APP ──────────────────────────────────────────────────
-st.markdown('<div class="main-header">📡 Telco Customer Churn Prediction</div>', unsafe_allow_html=True)
-st.markdown("**CBSOT Summer Internship 2026** | End-to-End ML Platform | Random Forest + XGBoost + SHAP")
-st.divider()
+def add_to_history(query, n):
+    st.session_state.history.insert(0,{
+        'query':query,'results':n,'timestamp':datetime.now().strftime('%d %b, %H:%M')})
+    st.session_state.history = st.session_state.history[:30]
 
-# Sidebar
+def add_bookmark(paper):
+    if not any(b['title']==paper['title'] for b in st.session_state.bookmarks):
+        st.session_state.bookmarks.append({
+            'title':paper['title'],'abstract':paper['abstract'][:300],
+            'score':paper['score'],'saved_at':datetime.now().strftime('%d %b %Y')})
+        return True
+    return False
+
+def make_pdf(query, results, summaries, kws_list):
+    buf    = io.BytesIO()
+    doc    = SimpleDocTemplate(buf, pagesize=letter,
+                               rightMargin=0.75*inch, leftMargin=0.75*inch,
+                               topMargin=1*inch, bottomMargin=0.75*inch)
+    styles = getSampleStyleSheet()
+    ts = ParagraphStyle('T',parent=styles['Title'],fontSize=16,
+                         textColor=colors.HexColor('#1F4E79'))
+    hs = ParagraphStyle('H',parent=styles['Heading2'],fontSize=11,
+                         textColor=colors.HexColor('#2E75B6'))
+    bs = ParagraphStyle('B',parent=styles['Normal'],fontSize=9,leading=13)
+    ms = ParagraphStyle('M',parent=styles['Normal'],fontSize=8,textColor=colors.gray)
+    story = [
+        Paragraph('AI Research Paper Intelligence System', ts),
+        Paragraph('CBSOT Summer Internship 2026', ms),
+        Spacer(1,0.1*inch),
+        HRFlowable(width='100%',thickness=2,color=colors.HexColor('#2E75B6')),
+        Spacer(1,0.1*inch),
+        Paragraph(f'Query: <b>{query}</b>', bs),
+        Paragraph(f'Papers: {len(results)} | {datetime.now().strftime("%d %B %Y")}', ms),
+        Spacer(1,0.15*inch),
+    ]
+    for i,r in enumerate(results):
+        story += [Paragraph(f'{i+1}. {r["title"]}', hs),
+                  Paragraph(f'Score: {r["score"]:.4f}', ms)]
+        if i < len(summaries):
+            story.append(Paragraph(f'<b>Summary:</b> {summaries[i]}', bs))
+        if i < len(kws_list):
+            story.append(Paragraph(f'<b>Keywords:</b> {", ".join(kws_list[i])}', bs))
+        short = r['abstract'][:350]+'...' if len(r['abstract'])>350 else r['abstract']
+        story += [Paragraph(f'<b>Abstract:</b> {short}', bs),
+                  HRFlowable(width='100%',thickness=0.5,color=colors.lightgrey),
+                  Spacer(1,0.08*inch)]
+    doc.build(story)
+    buf.seek(0)
+    return buf
+
+def sim_graph_fig(results):
+    paper_embs = np.array([embeddings[r['idx']] for r in results])
+    sim_mat    = cosine_similarity(paper_embs)
+    G = nx.Graph()
+    for i,r in enumerate(results):
+        G.add_node(i,title=r['title'][:35]+'...' if len(r['title'])>35 else r['title'],
+                   score=r['score'])
+    for i in range(len(results)):
+        for j in range(i+1,len(results)):
+            if sim_mat[i][j]>0.72: G.add_edge(i,j,weight=float(sim_mat[i][j]))
+    bg  = '#0e1117' if st.session_state.dark_mode else '#ffffff'
+    tc  = 'white'   if st.session_state.dark_mode else 'black'
+    fig,ax = plt.subplots(figsize=(10,7))
+    fig.patch.set_facecolor(bg); ax.set_facecolor(bg)
+    pos = nx.spring_layout(G,seed=42,k=2)
+    sc  = [G.nodes[n]['score'] for n in G.nodes]
+    nc  = plt.cm.YlOrRd(np.array(sc)/max(sc)) if sc else ['red']
+    nx.draw_networkx_nodes(G,pos,node_color=nc,node_size=1800,alpha=0.9,ax=ax)
+    if G.edges:
+        ew = [G[u][v]['weight']*3 for u,v in G.edges]
+        nx.draw_networkx_edges(G,pos,width=ew,alpha=0.5,edge_color='#667eea',ax=ax)
+        nx.draw_networkx_edge_labels(G,pos,
+            {(u,v):f"{G[u][v]['weight']:.2f}" for u,v in G.edges},font_size=6,ax=ax)
+    nx.draw_networkx_labels(G,pos,{n:G.nodes[n]['title'] for n in G.nodes},
+                            font_size=7,font_color=tc,ax=ax)
+    ax.set_title('Paper Similarity Graph',color=tc,fontweight='bold'); ax.axis('off')
+    plt.tight_layout()
+    return fig
+
+def citation_fig(queries, results_per_topic):
+    cl = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6']
+    all_p = []
+    for ti,(q,res) in enumerate(zip(queries,results_per_topic)):
+        for r in res: r['topic_idx']=ti; all_p.append(r)
+    G = nx.Graph()
+    for i,p in enumerate(all_p):
+        G.add_node(i,title=p['title'][:30]+'...' if len(p['title'])>30 else p['title'],
+                   color=cl[p['topic_idx']%len(cl)])
+    pe  = np.array([embeddings[p['idx']] for p in all_p])
+    sm  = cosine_similarity(pe)
+    for i in range(len(all_p)):
+        for j in range(i+1,len(all_p)):
+            same = all_p[i]['topic_idx']==all_p[j]['topic_idx']
+            if sm[i][j] > (0.70 if same else 0.82):
+                G.add_edge(i,j,weight=float(sm[i][j]),cross=not same)
+    bg = '#0e1117' if st.session_state.dark_mode else '#ffffff'
+    tc = 'white'   if st.session_state.dark_mode else 'black'
+    fig,ax = plt.subplots(figsize=(12,8))
+    fig.patch.set_facecolor(bg); ax.set_facecolor(bg)
+    pos   = nx.spring_layout(G,seed=42,k=1.5)
+    nc    = [G.nodes[n]['color'] for n in G.nodes]
+    intra = [(u,v) for u,v,d in G.edges(data=True) if not d.get('cross')]
+    cross = [(u,v) for u,v,d in G.edges(data=True) if d.get('cross')]
+    nx.draw_networkx_nodes(G,pos,node_color=nc,node_size=1200,alpha=0.85,ax=ax)
+    if intra: nx.draw_networkx_edges(G,pos,edgelist=intra,width=1.5,alpha=0.4,edge_color='gray',ax=ax)
+    if cross: nx.draw_networkx_edges(G,pos,edgelist=cross,width=2.5,alpha=0.8,
+                                     edge_color='white' if st.session_state.dark_mode else 'black',
+                                     style='dashed',ax=ax)
+    nx.draw_networkx_labels(G,pos,{n:G.nodes[n]['title'] for n in G.nodes},font_size=6,font_color=tc,ax=ax)
+    from matplotlib.patches import Patch
+    ax.legend(handles=[Patch(color=cl[i%len(cl)],label=q[:25]) for i,q in enumerate(queries)],
+              loc='upper left',fontsize=8,facecolor=bg,labelcolor=tc)
+    ax.set_title('Citation Network (Dashed=Cross-topic)',color=tc,fontweight='bold'); ax.axis('off')
+    plt.tight_layout()
+    return fig
+
+# ── LOAD ──────────────────────────────────────────────────────
+try:
+    with st.spinner("Loading models & index (~60s first load)..."):
+        embed_model, tokenizer, bart_model, kw_model = load_models()
+        index, df, embeddings = load_data()
+        tfidf_vec, tfidf_mat  = build_tfidf(df)
+    data_loaded = True
+except Exception as e:
+    data_loaded = False
+    st.error(f"Run Notebook 1 first to build the FAISS index!\n\nError: {e}")
+
+# ── SIDEBAR ────────────────────────────────────────────────────
 with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/artificial-intelligence.png", width=80)
-    st.title("Navigation")
-    page = st.radio("Go to", [
-        "📊 Dataset Overview",
-        "🤖 Model Performance",
-        "🔍 SHAP Explainability",
-        "🗂️ Customer Segments",
-        "🎯 Predict Single Customer"
+    st.markdown("### 📚 Research Paper Intelligence")
+    st.markdown("*CBSOT Summer Internship 2026*")
+    st.divider()
+
+    page = st.radio("Navigate", [
+        "🔍 Search Papers",
+        "📊 Semantic vs TF-IDF",
+        "🌐 Similarity Graph",
+        "🕸️ Citation Network",
+        "⚖️ Compare Papers",
+        "🔖 Bookmarks",
+        "🕐 Search History"
     ])
     st.divider()
-    # Theme toggle
+
+    st.markdown("**🤖 Groq API Key**")
+    groq_input = st.text_input("Groq API Key", type="password",
+                                value=st.session_state.groq_key,
+                                placeholder="gsk_...",
+                                help="Free key from console.groq.com")
+    if groq_input != st.session_state.groq_key:
+        st.session_state.groq_key = groq_input
+
+    if st.session_state.groq_key:
+        st.success("Groq ✅")
+    else:
+        st.caption("Get free key: console.groq.com")
+
+    st.divider()
     theme_label = "☀️ Light Mode" if st.session_state.dark_mode else "🌙 Dark Mode"
     if st.button(theme_label, use_container_width=True):
         st.session_state.dark_mode = not st.session_state.dark_mode
         st.rerun()
     st.divider()
-    st.caption("Dataset: IBM Telco Churn | 7,043 customers")
-    st.caption("Models: RF (3 variants) + XGBoost")
-    st.caption("Clustering: K-Means (k=3) + Silhouette")
+    st.caption(f"📌 Bookmarks: {len(st.session_state.bookmarks)}")
+    st.caption(f"🕐 Searches: {len(st.session_state.history)}")
+    st.caption("50k ArXiv ML Papers")
+    st.caption("MiniLM + FAISS + TF-IDF + Groq")
 
-# Load data
-with st.spinner("Loading data and training models... (~30s first load)"):
-    df_orig, X, y = load_and_preprocess()
-    rf_base, rf_bal, rf_tuned, xgb, X_train, X_test, y_train, y_test, best_params = train_models(X, y)
-    seg_data, sil_score_val = get_segmentation(rf_tuned, X, df_orig)
+# ── HEADER ─────────────────────────────────────────────────────
+st.markdown('<div class="main-title">📚 AI Research Paper Intelligence System</div>',
+            unsafe_allow_html=True)
+st.markdown("Semantic Search • TF-IDF • BART • KeyBERT • Groq LLaMA • Graphs • Compare • PDF Export")
+st.divider()
 
-# ═══════════════════════════════════════════════════
-# PAGE 1: Dataset Overview
-# ═══════════════════════════════════════════════════
-if page == "📊 Dataset Overview":
-    st.header("📊 Dataset Overview & EDA")
+if not data_loaded: st.stop()
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Customers", f"{len(df_orig):,}")
-    col2.metric("Churned", f"{(y==1).sum():,}", f"{(y==1).mean()*100:.1f}%")
-    col3.metric("Retained", f"{(y==0).sum():,}", f"{(y==0).mean()*100:.1f}%")
-    col4.metric("Features", f"{X.shape[1]}")
+# ══════════════════════════════════════════════════
+# PAGE 1: Search
+# ══════════════════════════════════════════════════
+if page == "🔍 Search Papers":
+    st.header("🔍 Semantic Search")
+    c1,c2,c3 = st.columns([4,1,1])
+    with c1: query = st.text_input("Query", placeholder="e.g. attention transformer NLP",
+                                    label_visibility="collapsed")
+    with c2: top_k = st.selectbox("Results", [5,10,15,20], index=1)
+    with c3: use_mmr = st.checkbox("MMR", value=True)
+    auto_sum = st.checkbox("Auto-summarize all (slower)", value=False)
 
-    st.divider()
-    tab1, tab2, tab3 = st.tabs(["Churn Distribution", "Tenure & Charges", "Contract Analysis"])
+    if query:
+        with st.spinner("Searching..."):
+            results = semantic_search(query, top_k=top_k, mmr=use_mmr)
+            add_to_history(query, len(results))
 
-    with tab1:
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-        churn_counts = df_orig['Churn Label'].value_counts()
-        axes[0].pie(churn_counts, labels=churn_counts.index, autopct='%1.2f%%',
-                    colors=['#2ecc71','#e74c3c'], startangle=90)
-        axes[0].set_title('Churn Rate', fontweight='bold')
-        sns.countplot(x='Churn Label', data=df_orig, ax=axes[1],
-                      palette=['#2ecc71','#e74c3c'])
-        axes[1].set_title('Churn Count', fontweight='bold')
-        st.pyplot(fig)
+        st.success(f"**{len(results)}** papers found")
+        if use_mmr: st.caption("✨ MMR diversity applied")
 
-    with tab2:
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-        sns.boxplot(x='Churn Label', y='Tenure Months', data=df_orig,
-                    ax=axes[0], palette=['#2ecc71','#e74c3c'])
-        axes[0].set_title('Tenure vs Churn', fontweight='bold')
-        sns.boxplot(x='Churn Label', y='Monthly Charges', data=df_orig,
-                    ax=axes[1], palette=['#2ecc71','#e74c3c'])
-        axes[1].set_title('Monthly Charges vs Churn', fontweight='bold')
-        plt.tight_layout()
-        st.pyplot(fig)
+        # Groq insights
+        if st.button("🤖 Groq: Research Trend Insights"):
+            with st.spinner("Asking Groq LLaMA..."):
+                insight = groq_insights(query, results)
+            st.info(f"**Groq Insights:** {insight}")
 
-        c1, c2 = st.columns(2)
-        churned_t = df_orig[df_orig['Churn Label']=='Yes']['Tenure Months'].mean()
-        retained_t = df_orig[df_orig['Churn Label']=='No']['Tenure Months'].mean()
-        c1.metric("Avg Tenure (Churned)", f"{churned_t:.1f} months")
-        c2.metric("Avg Tenure (Retained)", f"{retained_t:.1f} months")
+        # PDF export
+        if st.button("📄 Export as PDF"):
+            with st.spinner("Generating PDF..."):
+                sums = [summarize_bart(r['abstract']) for r in results]
+                kws  = [get_keywords(r['abstract']) for r in results]
+                buf  = make_pdf(query, results, sums, kws)
+            st.download_button("⬇️ Download PDF", data=buf,
+                               file_name=f"results_{query[:20].replace(' ','_')}.pdf",
+                               mime="application/pdf")
+        st.divider()
 
-    with tab3:
-        contract_churn = pd.crosstab(df_orig['Contract'], df_orig['Churn Label'],
-                                      normalize='index') * 100
-        fig, ax = plt.subplots(figsize=(10, 4))
-        contract_churn['Yes'].plot(kind='bar', ax=ax,
-                                    color=['#e74c3c','#f39c12','#2ecc71'], edgecolor='black')
-        ax.set_title('Churn Rate by Contract Type (%)', fontweight='bold')
-        ax.set_ylabel('Churn Rate (%)')
-        ax.tick_params(axis='x', rotation=15)
-        for p in ax.patches:
-            ax.annotate(f'{p.get_height():.1f}%',
-                        (p.get_x()+p.get_width()/2., p.get_height()),
-                        ha='center', va='bottom', fontweight='bold')
-        plt.tight_layout()
-        st.pyplot(fig)
+        for i,r in enumerate(results):
+            c1,c2 = st.columns([8,2])
+            with c1: st.markdown(f"**{i+1}. {r['title']}**")
+            with c2: st.markdown(f"`Score: {r['score']:.4f}`")
 
-        st.info("""
-        **Key Churn Rates by Contract:**
-        - 🔴 Month-to-Month: **~42.7%** churn
-        - 🟡 One-Year: **~11.3%** churn
-        - 🟢 Two-Year: **~2.8%** churn
-        """)
+            t1,t2,t3,t4 = st.tabs(["📄 Abstract","✂️ BART Summary","🤖 Groq Summary","🏷️ Keywords"])
+            with t1: st.write(r['abstract'])
+            with t2:
+                if st.button("Generate BART Summary", key=f"bs_{i}") or auto_sum:
+                    with st.spinner("Summarizing..."): s = summarize_bart(r['abstract'])
+                    st.info(s)
+            with t3:
+                if st.button("Generate Groq Summary", key=f"gs_{i}"):
+                    with st.spinner("Asking Groq..."): s = groq_summarize(r['abstract'])
+                    st.info(s)
+            with t4:
+                if st.button("Extract Keywords", key=f"kw_{i}"):
+                    with st.spinner("Extracting..."):
+                        kb_kws = get_keywords(r['abstract'])
+                        tf_kws = get_tfidf_keywords(r['abstract'])
+                    st.markdown("**KeyBERT:** " +
+                                " ".join([f'<span class="keyword-chip">{k}</span>' for k in kb_kws]),
+                                unsafe_allow_html=True)
+                    st.markdown("**TF-IDF:** " +
+                                " ".join([f'<span class="keyword-chip">{k}</span>' for k in tf_kws]),
+                                unsafe_allow_html=True)
 
-# ═══════════════════════════════════════════════════
-# PAGE 2: Model Performance
-# ═══════════════════════════════════════════════════
-elif page == "🤖 Model Performance":
-    st.header("🤖 Model Performance Comparison")
-    st.caption(f"Best GridSearchCV params: {best_params}")
+            if st.button("🔖 Bookmark", key=f"bm_{i}"):
+                st.success("Saved!") if add_bookmark(r) else st.warning("Already saved!")
+            st.markdown("---")
 
-    m1, p1, pr1 = get_metrics(rf_base, X_test, y_test)
-    m2, p2, pr2 = get_metrics(rf_bal, X_test, y_test)
-    m3, p3, pr3 = get_metrics(rf_tuned, X_test, y_test)
-    m4, p4, pr4 = get_metrics(xgb, X_test, y_test)
+# ══════════════════════════════════════════════════
+# PAGE 2: Semantic vs TF-IDF
+# ══════════════════════════════════════════════════
+elif page == "📊 Semantic vs TF-IDF":
+    st.header("📊 Semantic Search vs TF-IDF Search")
+    st.markdown("Compare results from **dense semantic search** (MiniLM + FAISS) vs **sparse keyword search** (TF-IDF).")
 
-    results_df = pd.DataFrame([
-        {'Model': 'RF Baseline',        **m1},
-        {'Model': 'RF Class Balanced',  **m2},
-        {'Model': 'RF GridSearchCV',    **m3},
-        {'Model': 'XGBoost',            **m4},
-    ])
+    c1,c2 = st.columns([4,1])
+    with c1: query = st.text_input("Query", placeholder="e.g. attention mechanism transformer")
+    with c2: top_k = st.selectbox("Results", [5,10], index=0)
 
-    st.dataframe(
-        results_df.style
-            .highlight_max(subset=['Accuracy','Precision','Recall','F1','ROC-AUC'],
-                           color='#d4edda')
-            .format({'Accuracy':'{:.4f}','Precision':'{:.4f}',
-                     'Recall':'{:.4f}','F1':'{:.4f}','ROC-AUC':'{:.4f}'}),
-        use_container_width=True
-    )
+    if query and st.button("🔍 Compare"):
+        with st.spinner("Running both searches..."):
+            sem_results  = semantic_search(query, top_k=top_k, mmr=False)
+            tf_results   = tfidf_search(query, top_k=top_k)
+            common       = set(r['title'] for r in sem_results) & set(r['title'] for r in tf_results)
 
-    st.info("🎯 **Priority metric = Recall** — Missing a churner costs more than a false alarm")
-    st.divider()
-
-    # ROC Curve
-    st.subheader("ROC-AUC Curve Comparison")
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for model, name, color, y_prob in [
-        (rf_tuned, 'RF GridSearchCV', '#e74c3c', pr3),
-        (xgb,      'XGBoost',         '#3498db', pr4),
-        (rf_bal,   'RF Balanced',      '#2ecc71', pr2),
-        (rf_base,  'RF Baseline',      '#999999', pr1),
-    ]:
-        fpr, tpr, _ = roc_curve(y_test, y_prob)
-        auc = roc_auc_score(y_test, y_prob)
-        ax.plot(fpr, tpr, label=f'{name} (AUC={auc:.4f})', linewidth=2, color=color)
-    ax.plot([0,1],[0,1],'k--', linewidth=1)
-    ax.set_xlabel('False Positive Rate'); ax.set_ylabel('True Positive Rate')
-    ax.set_title('ROC-AUC Curves — All Models', fontweight='bold')
-    ax.legend(loc='lower right')
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    st.pyplot(fig)
-
-    # Confusion Matrix
-    st.subheader("Confusion Matrices")
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    for ax, pred, name in [(axes[0], p3, 'RF GridSearchCV'), (axes[1], p4, 'XGBoost')]:
-        cm = confusion_matrix(y_test, pred)
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax,
-                    xticklabels=['Retained','Churned'],
-                    yticklabels=['Retained','Churned'])
-        ax.set_title(f'{name}', fontweight='bold')
-    plt.tight_layout()
-    st.pyplot(fig)
-
-# ═══════════════════════════════════════════════════
-# PAGE 3: SHAP
-# ═══════════════════════════════════════════════════
-elif page == "🔍 SHAP Explainability":
-    st.header("🔍 SHAP Explainability")
-    st.markdown("""
-    **SHAP (SHapley Additive exPlanations)** explains *why* the model makes each prediction.
-    Unlike default feature importance, SHAP accounts for feature interactions and is model-agnostic.
-    """)
-
-    with st.spinner("Computing SHAP values (~30 seconds)..."):
-        X_sample = X_test.sample(min(200, len(X_test)), random_state=42)
-        explainer = shap.TreeExplainer(rf_tuned)
-        shap_vals = explainer.shap_values(X_sample)
-        # Handle both old SHAP (returns list) and new SHAP (returns array)
-        if isinstance(shap_vals, list):
-            shap_churn = shap_vals[1]
-        else:
-            shap_churn = shap_vals if shap_vals.ndim == 2 else shap_vals[:, :, 1]
-
-    tab1, tab2 = st.tabs(["Summary Plot (Beeswarm)", "Feature Importance (Bar)"])
-
-    with tab1:
-        st.markdown("**How to read:** Each dot = one customer. Red = high feature value, Blue = low. X-axis = impact on churn prediction.")
-        fig, ax = plt.subplots(figsize=(10, 6))
-        shap.summary_plot(shap_churn, X_sample, plot_type='dot',
-                          max_display=15, show=False)
-        plt.title("SHAP Summary — Feature Impact on Churn", fontweight='bold')
-        plt.tight_layout()
-        st.pyplot(fig)
-
-    with tab2:
-        fig, ax = plt.subplots(figsize=(10, 5))
-        shap.summary_plot(shap_churn, X_sample, plot_type='bar',
-                          max_display=15, show=False)
-        plt.title("SHAP Global Feature Importance (Mean |SHAP|)", fontweight='bold')
-        plt.tight_layout()
-        st.pyplot(fig)
-
-    st.success("✅ SHAP confirms: **Tenure Months, Monthly Charges, Contract Type** are the top 3 churn drivers")
-
-# ═══════════════════════════════════════════════════
-# PAGE 4: Customer Segments
-# ═══════════════════════════════════════════════════
-elif page == "🗂️ Customer Segments":
-    st.header("🗂️ Customer Segmentation")
-    st.metric("Silhouette Score (K=3)", f"{sil_score_val:.4f}", "Higher = better defined clusters")
-    st.divider()
-
-    # Segment stats
-    seg_stats = seg_data.groupby('Segment').agg(
-        Count=('Tenure Months','count'),
-        Avg_Tenure=('Tenure Months','mean'),
-        Avg_Monthly=('Monthly Charges','mean'),
-        Avg_Total=('Total Charges','mean'),
-        Avg_Churn_Prob=('Churn Probability','mean')
-    ).round(2)
-
-    col1, col2, col3 = st.columns(3)
-    for col, (seg, css_cls, icon) in zip([col1, col2, col3], [
-        ('High Risk Customers',    'high-risk', '🔴'),
-        ('Budget Loyal Customers', 'budget',    '🟢'),
-        ('Loyal Premium Customers','premium',   '🔵'),
-    ]):
-        if seg in seg_stats.index:
-            row = seg_stats.loc[seg]
-            col.markdown(f"""
-            <div class="segment-card {css_cls}">
-                <h4>{icon} {seg}</h4>
-                <p><b>Count:</b> {int(row['Count']):,} customers</p>
-                <p><b>Avg Tenure:</b> {row['Avg_Tenure']} months</p>
-                <p><b>Avg Monthly:</b> ${row['Avg_Monthly']}</p>
-                <p><b>Avg Churn Prob:</b> {row['Avg_Churn_Prob']*100:.1f}%</p>
-            </div>
-            """, unsafe_allow_html=True)
-
-    st.divider()
-    st.subheader("Cluster Visualizations")
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-    colors_map = {'Budget Loyal Customers':'#2ecc71',
-                  'High Risk Customers':'#e74c3c',
-                  'Loyal Premium Customers':'#3498db'}
-    for i, (xcol, ycol) in enumerate([
-        ('Tenure Months','Churn Probability'),
-        ('Monthly Charges','Churn Probability'),
-        ('Total Charges','Churn Probability'),
-    ]):
-        for seg, grp in seg_data.groupby('Segment'):
-            axes[i].scatter(grp[xcol], grp[ycol],
-                            c=colors_map[seg], label=seg, alpha=0.4, s=10)
-        axes[i].set_xlabel(xcol); axes[i].set_ylabel(ycol)
-        axes[i].set_title(f'{xcol} vs Churn Prob', fontweight='bold')
-        if i == 0: axes[i].legend(fontsize=7)
-    plt.tight_layout()
-    st.pyplot(fig)
-
-    st.divider()
-    st.subheader("Business Recommendations")
-    recs = {
-        '🔴 High Risk Customers': [
-            'Trigger retention campaigns within 7 days',
-            'Offer 3-month free Tech Support bundle',
-            'Provide contract upgrade incentive (M2M → 1-year discount)',
-        ],
-        '🟢 Budget Loyal Customers': [
-            'Maintain current pricing — do NOT raise charges',
-            'Offer loyalty reward points for tenure milestones',
-            'Upsell affordable add-ons (Online Backup, Security)',
-        ],
-        '🔵 Loyal Premium Customers': [
-            'Priority customer support (dedicated helpline)',
-            'Early access to new services and features',
-            'Premium loyalty program enrollment',
-        ]
-    }
-    for seg, actions in recs.items():
-        with st.expander(seg):
-            for a in actions:
-                st.write(f"• {a}")
-
-    # Churn risk distribution
-    st.divider()
-    st.subheader("Churn Risk Category Distribution")
-    risk_counts = seg_data['Churn Risk'].value_counts()
-    fig, ax = plt.subplots(figsize=(7, 4))
-    bars = ax.bar(risk_counts.index, risk_counts.values,
-                  color=['#e74c3c','#f39c12','#2ecc71'], edgecolor='black')
-    for bar in bars:
-        ax.text(bar.get_x()+bar.get_width()/2., bar.get_height()+10,
-                f'{int(bar.get_height()):,}\n({bar.get_height()/len(seg_data)*100:.1f}%)',
-                ha='center', fontweight='bold')
-    ax.set_title('Customers by Churn Risk Category', fontweight='bold')
-    plt.tight_layout()
-    st.pyplot(fig)
-
-# ═══════════════════════════════════════════════════
-# PAGE 5: Predict Single Customer
-# ═══════════════════════════════════════════════════
-elif page == "🎯 Predict Single Customer":
-    st.header("🎯 Predict Churn for a New Customer")
-    st.markdown("Fill in the customer details to get a real-time churn prediction with SHAP explanation.")
-
-    with st.form("predict_form"):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            tenure       = st.slider("Tenure (Months)", 0, 72, 12)
-            monthly_ch   = st.slider("Monthly Charges ($)", 18, 120, 70)
-            contract     = st.selectbox("Contract Type", ["Month-to-month","One year","Two year"])
-        with col2:
-            internet     = st.selectbox("Internet Service", ["Fiber optic","DSL","No"])
-            tech_support = st.selectbox("Tech Support", ["Yes","No","No internet service"])
-            payment      = st.selectbox("Payment Method", ["Electronic check","Mailed check","Bank transfer (automatic)","Credit card (automatic)"])
-        with col3:
-            senior       = st.selectbox("Senior Citizen", ["No","Yes"])
-            partner      = st.selectbox("Has Partner", ["Yes","No"])
-            dependents   = st.selectbox("Has Dependents", ["No","Yes"])
-
-        submitted = st.form_submit_button("🔮 Predict Churn Risk", use_container_width=True)
-
-    if submitted:
-        # Build a minimal row matching encoded feature structure
-        # (Simple heuristic prediction using the key features SHAP identified)
-        churn_prob_estimate = 0.1
-
-        # Contract type contribution
-        if contract == "Month-to-month":      churn_prob_estimate += 0.30
-        elif contract == "One year":           churn_prob_estimate += 0.08
-
-        # Tenure contribution (inverse)
-        if tenure < 12:                        churn_prob_estimate += 0.25
-        elif tenure < 24:                      churn_prob_estimate += 0.10
-        elif tenure > 48:                      churn_prob_estimate -= 0.15
-
-        # Monthly charges
-        if monthly_ch > 80:                    churn_prob_estimate += 0.10
-        elif monthly_ch < 40:                  churn_prob_estimate -= 0.08
-
-        # Tech support
-        if tech_support == "No":               churn_prob_estimate += 0.12
-
-        # Internet
-        if internet == "Fiber optic":          churn_prob_estimate += 0.08
-
-        # Senior
-        if senior == "Yes":                    churn_prob_estimate += 0.05
-
-        churn_prob_estimate = min(max(churn_prob_estimate, 0.01), 0.99)
-
-        # Risk level
-        if churn_prob_estimate >= 0.60:
-            risk_label = "🔴 HIGH RISK"
-            risk_color = "error"
-            recommendation = "⚡ **Immediate Action Required:** Trigger retention campaign, offer contract upgrade incentive, assign dedicated support."
-        elif churn_prob_estimate >= 0.30:
-            risk_label = "🟡 MEDIUM RISK"
-            risk_color = "warning"
-            recommendation = "⚠️ **Monitor Closely:** Send personalized loyalty offer, check satisfaction, consider proactive outreach."
-        else:
-            risk_label = "🟢 LOW RISK"
-            risk_color = "success"
-            recommendation = "✅ **Customer is Stable:** Maintain engagement, upsell opportunities exist."
+        c1,c2 = st.columns(2)
+        with c1:
+            st.markdown("### 🧠 Semantic Search")
+            st.caption("all-MiniLM-L6-v2 + FAISS | Meaning-based")
+            for i,r in enumerate(sem_results):
+                st.markdown(f"**{i+1}.** {r['title'][:70]}  \n`{r['score']:.4f}`")
+        with c2:
+            st.markdown("### 📊 TF-IDF Search")
+            st.caption("sklearn TfidfVectorizer | Keyword-based")
+            for i,r in enumerate(tf_results):
+                st.markdown(f"**{i+1}.** {r['title'][:70]}  \n`{r['score']:.4f}`")
 
         st.divider()
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Churn Probability", f"{churn_prob_estimate*100:.1f}%")
-        col2.metric("Risk Level", risk_label)
-        col3.metric("Tenure", f"{tenure} months")
+        st.metric("Common Results", f"{len(common)}/{top_k}",
+                  help="Papers appearing in both search results")
+        if common:
+            st.markdown("**Common papers:**")
+            for t in common: st.markdown(f"✓ {t[:80]}")
 
-        if risk_color == "error":    st.error(recommendation)
-        elif risk_color == "warning": st.warning(recommendation)
-        else:                          st.success(recommendation)
-
-        # Visual gauge
-        fig, ax = plt.subplots(figsize=(8, 2))
-        ax.barh([0], [churn_prob_estimate], color='#e74c3c', height=0.4)
-        ax.barh([0], [1 - churn_prob_estimate], left=[churn_prob_estimate],
-                color='#2ecc71', height=0.4)
-        ax.set_xlim(0, 1); ax.set_yticks([])
-        ax.set_xlabel('Churn Probability')
-        ax.set_title(f'Churn Risk Gauge — {churn_prob_estimate*100:.1f}%', fontweight='bold')
-        ax.axvline(x=0.3, color='orange', linestyle='--', linewidth=1, label='Medium threshold (0.30)')
-        ax.axvline(x=0.6, color='red',    linestyle='--', linewidth=1, label='High threshold (0.60)')
-        ax.legend(loc='upper right', fontsize=8)
+        # Bar chart
+        fig,axes = plt.subplots(1,2,figsize=(16,5))
+        bg = '#0e1117' if st.session_state.dark_mode else '#ffffff'
+        tc = 'white'   if st.session_state.dark_mode else 'black'
+        for ax,res,title,color in [
+            (axes[0],sem_results,'Semantic Search','#3498db'),
+            (axes[1],tf_results, 'TF-IDF Search',  '#e74c3c')
+        ]:
+            fig.patch.set_facecolor(bg); ax.set_facecolor(bg)
+            labels = [r['title'][:38]+'...' for r in res]
+            sc     = [r['score'] for r in res]
+            bars   = ax.barh(range(len(labels)),sc,color=color,alpha=0.8)
+            ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels,fontsize=8,color=tc)
+            ax.set_title(title,fontweight='bold',color=tc)
+            ax.set_xlabel('Score',color=tc); ax.tick_params(colors=tc)
+            for bar,s in zip(bars,sc):
+                ax.text(bar.get_width()+0.001,bar.get_y()+bar.get_height()/2,
+                        f'{s:.3f}',va='center',fontsize=8,color=tc)
+            for spine in ax.spines.values(): spine.set_color(border if not st.session_state.dark_mode else '#444')
+        plt.suptitle(f'Semantic vs TF-IDF | Query: "{query}"',fontsize=13,fontweight='bold',color=tc)
         plt.tight_layout()
         st.pyplot(fig)
 
-        st.caption("Note: Single-customer prediction uses key feature heuristics derived from SHAP analysis. For batch prediction, run the full ML pipeline in the notebooks.")
+        st.info("**Why different results?** Semantic search understands *meaning* — "
+                "searching 'attention mechanism' also finds 'self-attention transformer' papers. "
+                "TF-IDF only matches exact keywords.")
+
+# ══════════════════════════════════════════════════
+# PAGE 3: Similarity Graph
+# ══════════════════════════════════════════════════
+elif page == "🌐 Similarity Graph":
+    st.header("🌐 Paper Similarity Graph")
+    st.markdown("Nodes = papers | Edges = cosine similarity > threshold")
+    c1,c2 = st.columns([3,1])
+    with c1: sg_q = st.text_input("Query", placeholder="e.g. graph neural networks")
+    with c2: sg_k = st.slider("Papers", 5,15,8)
+
+    if sg_q and st.button("🌐 Build Graph"):
+        with st.spinner("Building..."):
+            res = semantic_search(sg_q, top_k=sg_k, mmr=False)
+            fig = sim_graph_fig(res)
+        st.pyplot(fig)
+        for i,r in enumerate(res):
+            st.markdown(f"**{i+1}.** {r['title']} — `{r['score']:.4f}`")
+
+# ══════════════════════════════════════════════════
+# PAGE 4: Citation Network
+# ══════════════════════════════════════════════════
+elif page == "🕸️ Citation Network":
+    st.header("🕸️ Citation Network")
+    num_topics = st.slider("Number of topics", 2,4,3)
+    topics = [st.text_input(f"Topic {i+1}", key=f"t{i}",
+                             placeholder=f"e.g. {'transformer' if i==0 else 'GAN' if i==1 else 'reinforcement learning'}")
+              for i in range(num_topics)]
+    ppt = st.slider("Papers per topic", 3,8,4)
+
+    if all(topics) and st.button("🕸️ Build Network"):
+        with st.spinner("Building..."):
+            all_res = [semantic_search(t, top_k=ppt, mmr=True) for t in topics]
+            fig     = citation_fig(topics, all_res)
+        st.pyplot(fig)
+        st.caption("Solid = same-topic | Dashed = cross-topic connections")
+
+# ══════════════════════════════════════════════════
+# PAGE 5: Compare Papers
+# ══════════════════════════════════════════════════
+elif page == "⚖️ Compare Papers":
+    st.header("⚖️ Compare Two Papers")
+    c1,c2 = st.columns(2)
+    with c1: q1 = st.text_input("Query A", placeholder="e.g. BERT language model")
+    with c2: q2 = st.text_input("Query B", placeholder="e.g. GPT generative model")
+
+    if q1 and q2 and st.button("⚖️ Compare"):
+        with st.spinner("Comparing..."):
+            r1 = semantic_search(q1, top_k=1, mmr=False)[0]
+            r2 = semantic_search(q2, top_k=1, mmr=False)[0]
+            cross_sim  = cosine_similarity(embeddings[r1['idx']].reshape(1,-1),
+                                           embeddings[r2['idx']].reshape(1,-1))[0][0]
+            tfidf_sim  = cos_sim(tfidf_vec.transform([r1['abstract']]),
+                                 tfidf_vec.transform([r2['abstract']]))[0][0]
+            sum1 = summarize_bart(r1['abstract'])
+            sum2 = summarize_bart(r2['abstract'])
+            kw1  = get_keywords(r1['abstract'])
+            kw2  = get_keywords(r2['abstract'])
+            common = set(kw1) & set(kw2)
+
+        c1,c2,c3 = st.columns(3)
+        c1.metric("Semantic Similarity", f"{cross_sim:.4f}")
+        c2.metric("TF-IDF Similarity",   f"{tfidf_sim:.4f}")
+        c3.metric("Difference",           f"{abs(cross_sim-tfidf_sim):.4f}")
+        if common: st.info(f"**Common Keywords:** {', '.join(common)}")
+
+        # Groq analysis
+        if st.button("🤖 Groq AI Analysis"):
+            with st.spinner("Asking Groq..."):
+                analysis = groq_compare(r1, r2, cross_sim)
+            st.success(analysis)
+
+        st.divider()
+        c1,c2 = st.columns(2)
+        for col,r,sum_,kws in [(c1,r1,sum1,kw1),(c2,r2,sum2,kw2)]:
+            with col:
+                st.markdown(f"**{r['title']}**")
+                st.caption(f"Score: {r['score']:.4f}")
+                st.info(sum_)
+                kw_html = " ".join([f'<span class="keyword-chip">{k}</span>' for k in kws])
+                st.markdown(kw_html, unsafe_allow_html=True)
+                if st.button("🔖 Bookmark", key=f"bm_cmp_{r['idx']}"):
+                    st.success("Saved!") if add_bookmark(r) else st.warning("Already saved!")
+
+# ══════════════════════════════════════════════════
+# PAGE 6: Bookmarks
+# ══════════════════════════════════════════════════
+elif page == "🔖 Bookmarks":
+    st.header("🔖 Saved Papers")
+    if not st.session_state.bookmarks:
+        st.info("No bookmarks yet!")
+    else:
+        st.success(f"{len(st.session_state.bookmarks)} papers saved")
+        if st.button("🗑️ Clear All"): st.session_state.bookmarks=[]; st.rerun()
+        if st.button("📄 Export as PDF"):
+            res = [{'title':b['title'],'abstract':b['abstract'],'score':b['score'],'idx':0}
+                   for b in st.session_state.bookmarks]
+            buf = make_pdf("My Bookmarks", res, [], [])
+            st.download_button("⬇️ Download",data=buf,file_name="bookmarks.pdf",
+                               mime="application/pdf")
+        st.divider()
+        for i,bm in enumerate(st.session_state.bookmarks):
+            with st.expander(f"📄 {bm['title'][:80]}"):
+                st.caption(f"Saved: {bm['saved_at']} | Score: {bm['score']:.4f}")
+                st.write(bm['abstract'])
+                if st.button("🗑️ Remove", key=f"rm_{i}"):
+                    st.session_state.bookmarks.pop(i); st.rerun()
+
+# ══════════════════════════════════════════════════
+# PAGE 7: Search History
+# ══════════════════════════════════════════════════
+elif page == "🕐 Search History":
+    st.header("🕐 Search History")
+    if not st.session_state.history:
+        st.info("No history yet!")
+    else:
+        st.success(f"{len(st.session_state.history)} searches")
+        if st.button("🗑️ Clear History"): st.session_state.history=[]; st.rerun()
+        st.divider()
+        for h in st.session_state.history:
+            c1,c2,c3 = st.columns([5,2,2])
+            with c1: st.markdown(f"🔍 {h['query']}")
+            with c2: st.caption(f"{h['results']} results")
+            with c3: st.caption(h['timestamp'])
